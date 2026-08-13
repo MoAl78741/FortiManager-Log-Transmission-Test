@@ -14,3 +14,6 @@ venv/
 *.egg-info/
 .mypy_cache/
 .pytest_cache/
+
+# Windows "downloaded from the internet" marker files
+*:Zone.Identifier
