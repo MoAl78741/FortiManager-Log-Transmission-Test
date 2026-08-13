@@ -215,7 +215,7 @@ constructs it:
 sniffer:
   enabled: true
   command: |
-    diagnose sniffer packet any 'host 10.0.10.221' 6 0 a
+    diagnose sniffer packet any 'host 10.0.10.221' 3 -1 a
 ```
 
 Other keys: `block_idle_seconds` (how much silence ends a packet block),
