@@ -1,0 +1,407 @@
+# =============================================================================
+# FortiManager log transmission test - configuration
+# =============================================================================
+#
+# Everything device-specific and test-specific lives here. No IP address,
+# credential, command, expected message, interval, Graylog filter or
+# correlation parameter is hardcoded in the Python code.
+#
+# Sections for later phases (sniffer, debug, graylog) are parsed and validated
+# by this build, but are only acted on from Phase 2 / Phase 3 onward. That
+# keeps this file stable across the whole project.
+#
+# Validate without connecting to anything:
+#     python main.py --check-config
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Target device
+# -----------------------------------------------------------------------------
+fortimanager:
+  host: "192.168.1.170"
+  port: 22
+  username: "admin"
+
+  # RECOMMENDED: name of the environment variable holding the password.
+  #   Linux/macOS:  export FORTIMANAGER_PASSWORD='...'
+  #   PowerShell:   $env:FORTIMANAGER_PASSWORD = '...'
+  # Startup fails with a clear message if the variable is not set.
+  password_env: "FORTIMANAGER_PASSWORD"
+
+  # Lab alternative (discouraged: the password sits in plaintext on disk).
+  # Remove password_env above if you use this.
+  # password: "changeme"
+
+  # Optional: SSH private keys instead of, or in addition to, a password.
+  # client_keys:
+  #   - "~/.ssh/id_ed25519"
+
+  # Cosmetic label used in logs and reports. Defaults to the host.
+  device_name: "fmgvm01"
+
+  # Host key checking. FortiManager appliances are frequently rekeyed in labs,
+  # so this defaults to off. Set true and point known_hosts_file at a file to
+  # verify the host key.
+  strict_host_key: false
+  # known_hosts_file: "~/.ssh/known_hosts"
+
+  connect_timeout_seconds: 20
+  command_timeout_seconds: 30
+
+  # How long to wait for the login banner and first prompt.
+  login_grace_seconds: 10
+
+  # Fallback prompt detection. The tool first *learns* the real prompt by
+  # pressing Enter after login; this regex is only used if that fails.
+  # Matches e.g. "FMGVM01 #" and "FMGVM01 (global) #".
+  prompt_pattern: "[\r\n][^\r\n]{0,80}?[#$]\\s*$"
+
+  # Run once on every new session. Turning off CLI paging is important:
+  # a "--More--" pager will otherwise chop long command output.
+  # (The tool also answers pagers automatically, but disabling them is cleaner.)
+  session_init_commands: |
+    config system console
+    set output standard
+    end
+
+  # Some FortiManager builds only offer legacy SSH algorithms. Uncomment and
+  # populate these if asyncssh reports "no matching ... algorithm found".
+  # kex_algs:
+  #   - "diffie-hellman-group14-sha1"
+  # encryption_algs:
+  #   - "aes128-cbc"
+  # server_host_key_algs:
+  #   - "ssh-rsa"
+
+  reconnect:
+    enabled: true
+    initial_delay_seconds: 2
+    max_delay_seconds: 30
+    max_attempts: 0        # 0 = retry forever
+
+
+# -----------------------------------------------------------------------------
+# Repeating command groups
+#
+# Each group runs independently, as its own asyncio task, at its own interval.
+# Exactly one group should set `test_event: true`; each execution of that
+# group's test command becomes an independent TEST-nnnnnn event.
+# -----------------------------------------------------------------------------
+command_groups:
+  - name: "enable debug logd 255"
+    interval_seconds: 1500
+    enabled: true          # flip to true if you want periodic context
+    log_output: true
+    commands: |
+      diag debug application logd 255
+      diag debug enable
+
+  - name: "generate_test_log"
+    interval_seconds: 3600
+    test_event: true
+    # Which command in this group generates the TEST event (0 = the first).
+    test_command_index: 0
+    commands: |
+      diagnose test application miglogd 9
+
+
+
+# -----------------------------------------------------------------------------
+# Correlation
+# -----------------------------------------------------------------------------
+correlation:
+  enabled: true
+
+  # Optional: name the test command group here instead of using
+  # `test_event: true` above. If set, it wins.
+  # test_group: "generate_test_log"
+
+  # What FortiManager prints when it claims the event was generated.
+  # This is a CLAIM, never proof that a packet was transmitted.
+  cli_success_pattern: "Sent out one test local event log"
+
+  # Optional extra strings that positively indicate failure.
+  cli_failure_patterns:
+    - "Command fail"
+
+  # The event FortiManager should emit, and how to spot it downstream.
+  expected_message: "Power 1 goes to online"
+  sniffer_match_pattern: "Power 1 goes to online"
+  graylog_match_pattern: "Power 1 goes to online"
+
+  # How long after a CLI execution a matching packet / Graylog record may
+  # still be claimed by that test event.
+  timeout_seconds: 10
+
+  # Slack for clock skew between FortiManager, this computer and Graylog.
+  timestamp_tolerance_seconds: 2
+
+  # false = a captured sniffer or Graylog event may satisfy only ONE test
+  # event (matches are consumable). This is what makes repeated identical
+  # "Power 1 goes to online" messages countable.
+  allow_reuse: false
+
+  # Treat the *_pattern values above as regular expressions instead of
+  # case-insensitive substrings.
+  pattern_is_regex: false
+
+  # ---------------------------------------------------------------------------
+  # Secondary correlation keys.
+  #
+  # Order-based matching is the fallback, not the goal. When the event carries
+  # something unique -- a sequence number, a log id -- two observations sharing
+  # that value are the SAME event, and correlation stops depending on arrival
+  # order. This is what makes matching survive out-of-order Graylog indexing.
+  #
+  # A pattern that finds nothing simply contributes no key and matching falls
+  # back to order, so an unhelpful pattern can never make things worse.
+  #
+  # NOTE: FortiManager's reply to the test command carries no identifier, so
+  # identity links the SNIFFER and GRAYLOG evidence to each other; the CLI is
+  # still tied to them by the time window.
+  # ---------------------------------------------------------------------------
+  identity:
+    enabled: true
+
+    # true = evidence may ONLY be claimed when its identity matches. Stricter
+    # and unambiguous, but anything the patterns cannot read becomes a MISS.
+    require: false
+
+    # Omit `fields` entirely to use the built-in defaults:
+    #   seq, log_id, device_id, device_name, event_time
+    # fields:
+    #   - name: "seq"
+    #     pattern: 'seq=(\d+)'
+    #   - name: "log_id"
+    #     pattern: 'logid="?(\d+)"?'
+
+  # ---------------------------------------------------------------------------
+  # Optional packet-flow constraint on sniffer matches.
+  #
+  # A packet carrying the expected message but going somewhere else is not the
+  # event under test. Leave empty to accept any flow. A field the sniffer could
+  # not parse is never treated as a mismatch.
+  # ---------------------------------------------------------------------------
+  sniffer_flow:
+    dst_ip: ""          # e.g. "10.0.10.221"
+    dst_port: 0         # e.g. 514
+    src_ip: ""
+    src_port: 0
+    direction: ""       # "in" or "out"
+
+  # true = a test event may not claim evidence that appeared after the NEXT
+  # test command was issued, even if its own window is still open. Without
+  # this, an earlier event greedily consumes the later event's evidence and
+  # the later one is wrongly reported as a MISS. Turn off only if your
+  # end-to-end latency genuinely exceeds the test interval.
+  bound_window_by_next_event: true
+
+
+# -----------------------------------------------------------------------------
+# Packet sniffer  (Phase 2)  -- PRIMARY EVIDENCE OF TRANSMISSION
+#
+# The COMPLETE FortiManager sniffer command must be supplied here. The tool
+# never constructs it. Verbosity 6 gives headers plus hex/ASCII payload, which
+# is what the payload reassembly needs: the expected message is normally split
+# across several hex dump lines, so the tool rebuilds the packet bytes by
+# offset and searches the reconstructed payload rather than each printed line.
+# -----------------------------------------------------------------------------
+sniffer:
+  enabled: true
+  command: |
+    diagnose sniffer packet any 'host 10.0.10.221' 3 -1 a
+
+  # Name of the dedicated SSH session for the sniffer (appears in logs).
+  session_name: "sniffer"
+
+  # A packet block ends at the next header line, or after this much silence.
+  # Raise it on a very busy or laggy link if blocks are being split.
+  block_idle_seconds: 0.35
+
+  # Echo raw sniffer output (including the hex dump) into the log and the
+  # SNIFFER pane. Turn off for a quieter log on a busy capture.
+  echo_to_log: true
+
+  # Rebuild packet bytes from the hex columns. Turn off only if you are
+  # running a low verbosity level that prints no hex; matching then falls
+  # back to the ASCII column and the raw block text.
+  decode_hex_payload: true
+
+  # Key sent to stop the capture at shutdown. "\x03" is Ctrl+C.
+  stop_key: "\x03"
+
+
+# -----------------------------------------------------------------------------
+# Optional logd / miglogd debug session  (Phase 2)
+#
+# Diagnostic evidence only. Debug output is NEVER treated as proof that a
+# packet was transmitted. cleanup_commands always run at shutdown.
+# -----------------------------------------------------------------------------
+debug:
+  enabled: true
+
+  setup_commands: |
+    diagnose debug application logd 255
+    diagnose debug enable
+
+  cleanup_commands: |
+    diagnose debug disable
+    diagnose debug reset
+
+  # Optional substrings worth flagging in the debug stream. Defaults to
+  # correlation.expected_message when omitted.
+  match_patterns:
+    - "Power 1 goes to online"
+
+  # Name of the dedicated SSH session for debug (appears in logs).
+  session_name: "debug"
+
+  # Echo every debug line into the log and the SNIFFER/DEBUG pane.
+  echo_to_log: true
+
+
+# -----------------------------------------------------------------------------
+# Graylog  --  EVIDENCE THE DESTINATION RECEIVED AND INDEXED THE EVENT
+#
+# Uses the Graylog Views/Search API (POST /api/views/search then /execute).
+# Any key under `filters` is turned into a query term automatically: adding a
+# new field needs no code change.
+#
+# Searches never reach earlier than the test-start timestamp, so a historical
+# "Power 1 goes to online" from last week can never be correlated with this run.
+# -----------------------------------------------------------------------------
+graylog:
+  enabled: true
+  url: "http://10.0.10.221:9001"
+  # username: "admin"
+  # password_env: "GRAYLOG_PASSWORD"
+
+  # Alternative to username/password: a Graylog API token.
+  api_token_env: "GRAYLOG_API_TOKEN"
+
+  api: "views"
+  verify_tls: true
+  # ca_bundle: "/etc/ssl/certs/internal-ca.pem"
+
+  timeout_seconds: 30
+  poll_interval_seconds: 5
+
+  # Re-query a little way into the past on each poll so a record indexed just
+  # after the previous window closed is not missed.
+  poll_overlap_seconds: 2
+
+  # Every poll re-scans the last (poll_interval + overlap + this) seconds.
+  # A record indexed later than that falls behind the advancing window and is
+  # never returned at all -- reported as a MISS when it was in fact delivered.
+  # The run warns if it observes indexing slower than this value.
+  max_indexing_lag_seconds: 30
+
+  limit: 500
+  message_field: "message"
+  timestamp_field: "timestamp"
+
+  # false (default) = fetch everything matching `filters` and check the message
+  #   content locally. Slower, but when nothing matches you can SEE the near
+  #   misses in debug mode instead of staring at an empty result set.
+  # true = also put the expected message in the Lucene query. Much less data
+  #   on a high-volume source, but Elasticsearch tokenisation decides what
+  #   "matches", and a phrase that does not tokenise as you expect silently
+  #   returns nothing.
+  include_message_in_query: false
+
+  # Arbitrary filter fields. Add as many as you like; each becomes a
+  # `field:"value"` term ANDed into the query.
+  filters:
+    source: "fmgvm01"
+    # facility: "local7"
+    # device_id: "FMVMELTM25001041"
+
+  # Raw Lucene appended to the generated query, for anything filters cannot
+  # express.
+  # query_extra: 'NOT level:7'
+
+  # Restrict the search to specific stream IDs.
+  # streams:
+  #   - "000000000000000000000001"
+
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+logging:
+  # combined -> one file with [CLI] / [SNIFFER] / [GRAYLOG] / ... labels
+  # separate -> one file per source
+  mode: "separate"
+
+  directory: "./logs"
+  # report_directory: "./reports"     # defaults to `directory`
+
+  # plain = timestamped lines to stdout
+  # rich  = live split-screen display (CLI / SNIFFER+DEBUG / GRAYLOG+STATUS).
+  #         Falls back to plain automatically when stdout is not a terminal.
+  # none  = files only
+  # Override per run with --console / --plain.
+  console: "rich"
+
+  file_prefix: "fortimanager"
+  timestamp_format: "%Y-%m-%d %H:%M:%S.%f"
+  timestamp_precision_ms: 3
+
+  # Echo raw device output into the log, prefixed with "| ".
+  echo_raw_command_output: true
+
+  # Truncate very long raw lines. 0 = never truncate.
+  max_raw_line_length: 0
+
+
+# -----------------------------------------------------------------------------
+# Debug mode  --  use this when the results do not look right
+#
+# Turn on with `--debug-mode` (no config change needed) or by setting
+# enabled: true here. It answers "why did this not match?" rather than just
+# reporting MISS, and writes, per run:
+#
+#   raw_cli_<ts>.log          verbatim bytes from the CLI session
+#   raw_sniffer_<ts>.log      verbatim bytes from the sniffer session
+#   raw_debug_<ts>.log        verbatim bytes from the debug session
+#   raw_graylog_<ts>.jsonl    every Graylog API exchange (Phase 3)
+#   comparison_<ts>.txt       per test event: CLI + sniffer + debug + Graylog
+#                             side by side, the exact correlation window, every
+#                             candidate examined, and why each did or did not
+#                             match, plus an aggregate tally of reason codes
+#   comparison_<ts>.json      the same, machine readable
+#
+# Costs disk and a little CPU on a busy capture; leave it off for long soaks.
+# -----------------------------------------------------------------------------
+diagnostics:
+  enabled: false
+
+  # Defaults to <logging.directory>/diagnostics.
+  # directory: "./logs/diagnostics"
+
+  # Verbatim per-session capture files.
+  raw_streams: true
+
+  # Record EVERY packet / debug line examined, not just the matching ones.
+  # This is what makes "why did it not match" answerable. Turning it off keeps
+  # only matches, which is much smaller but far less useful.
+  capture_all_candidates: true
+
+  # Write the per-event side-by-side comparison report.
+  comparison_report: true
+
+  # Include the raw packet block text under each candidate in the report.
+  include_raw_blocks: true
+
+  # Ring buffer of candidates held in memory per source.
+  max_candidates: 5000
+
+  # Cap on candidates printed per test event in the comparison report.
+  max_candidates_per_event: 25
+
+  # Cap on raw lines printed per candidate.
+  max_raw_block_lines: 24
+
+  # How much decoded packet content to show per candidate.
+  payload_preview_chars: 300

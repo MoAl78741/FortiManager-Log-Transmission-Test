@@ -1,0 +1,13 @@
+# FortiManager log transmission test tool
+#
+# Phase 1 uses: asyncssh, PyYAML
+# Phase 2 will use: rich  (live split-screen display)
+# Phase 3 will use: aiohttp (async Graylog REST client)
+#
+# rich and aiohttp are pinned now so the environment does not have to be
+# rebuilt between phases.
+
+asyncssh>=2.14.0,<3.0
+PyYAML>=6.0,<7.0
+rich>=13.7.0,<15.0
+aiohttp>=3.9.0,<4.0

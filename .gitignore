@@ -1,0 +1,16 @@
+# Test output: logs and reports contain device output and should not be committed
+logs/
+reports/
+
+# Local configuration overrides (may contain lab credentials)
+config.local.yaml
+*.local.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
